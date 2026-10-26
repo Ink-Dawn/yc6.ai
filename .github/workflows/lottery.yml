@@ -1,0 +1,46 @@
+name: YC6 two-account lottery (no GPT)
+
+on:
+  schedule:
+    - cron: '7,37 9 * * *'
+      timezone: Asia/Shanghai
+    - cron: '7,37 22 * * *'
+      timezone: Asia/Shanghai
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'verify checks login only; join signs up and checks results; check queries results only'
+        type: choice
+        required: true
+        default: verify
+        options: [verify, join, check]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yc6-two-account-lottery
+  cancel-in-progress: false
+
+jobs:
+  lottery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      YC6_TOKEN_EDGE: ${{ secrets.YC6_TOKEN_EDGE }}
+      YC6_TOKEN_CHROME: ${{ secrets.YC6_TOKEN_CHROME }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GITHUB_TOKEN: ${{ github.token }}
+      RUN_MODE: ${{ inputs.mode || (github.event.schedule == '7,37 22 * * *' && 'check') || 'join' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline behavior tests (no website login or submissions)
+        run: python -m unittest discover -s tests -v
+      - name: Two-account login / signup / own-result query
+        run: python lottery.py --mode "$RUN_MODE"
