@@ -4,12 +4,15 @@ from __future__ import annotations
 import argparse
 import base64
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+import hashlib
 import json
 import os
-from pathlib import Path
 import re
+import smtplib
+import ssl
 import sys
-from urllib import error, parse, request
+from urllib import error, request
 
 
 class NoRedirect(request.HTTPRedirectHandler):
@@ -179,14 +182,21 @@ class GitHubState:
         # GitHub's blob SHA provides compare-and-swap. Never retry an ambiguous write.
         fetch_json(self.base + '/contents/.state/' + name, self.headers, body, method='PUT')
 
-    def reserve(self):
-        content, sha = self.load('notification.json')
-        if content is not None:
-            if content.get('reserved') is not True:
-                raise RuntimeError('unexpected_notification_state')
-            return False
-        self.write('notification.json', {'reserved': True, 'at': datetime.now(timezone.utc).isoformat()}, sha)
-        return True
+    @staticmethod
+    def notification_filename(event_key):
+        digest = hashlib.sha256(event_key.encode('utf-8')).hexdigest()
+        return 'notified/' + digest + '.json'
+
+    def was_notified(self, event_key):
+        content, _ = self.load(self.notification_filename(event_key))
+        return content is not None and content.get('sent') is True
+
+    def mark_notified(self, event_key):
+        name = self.notification_filename(event_key)
+        content, sha = self.load(name)
+        if content is not None and content.get('sent') is True:
+            return
+        self.write(name, {'sent': True, 'at': datetime.now(timezone.utc).isoformat()}, sha)
 
     def heartbeat(self):
         content, sha = self.load('heartbeat.json')
@@ -197,32 +207,46 @@ class GitHubState:
 
 
 def notify_once(records, store, send, enabled):
-    winners = [record['label'] for record in records if record['wins']]
-    if not winners:
+    if not any(record['wins'] for record in records):
         return 'no_win'
     if not enabled:
         return 'channel_not_configured'
-    # Reservation precedes send: at most one attempt total, including across
-    # accounts, restarts, repeated wins and ambiguous network failures.
+    pending = []
     try:
-        if not store.reserve():
-            return 'already_reserved'
+        for record in records:
+            for win_id in sorted(set(int(value) for value in record['wins'])):
+                event_key = f"yc6-lottery-1:{record['label']}:{win_id}"
+                if not store.was_notified(event_key):
+                    pending.append((record['label'], win_id, event_key))
     except Exception:
-        return 'reservation_failed'
-    message = 'YC6 抽奖已确认中奖：' + '、'.join(winners) + '。请在对应账号查看奖品：\nhttps://yc6.ai/account.html?view=lotteries'
+        return 'notification_state_failed'
+    if not pending:
+        return 'already_notified'
+    lines = ['YC6 抽奖发现新的中奖记录：']
+    lines.extend(f'- {label} 账号：中奖记录编号 {win_id}' for label, win_id, _ in pending)
+    lines.extend(['', '请登录对应账号查看奖品详情：', 'https://yc6.ai/account.html?view=lotteries'])
     try:
-        send(message)
+        send('\\n'.join(lines))
     except Exception:
-        return 'delivery_uncertain'
+        return 'delivery_failed'
+    try:
+        for _, _, event_key in pending:
+            store.mark_notified(event_key)
+    except Exception:
+        return 'sent_state_unrecorded'
     return 'sent'
 
 
-def telegram_sender(token, chat_id):
+def email_sender(username, password, recipient):
     def send(message):
-        result = fetch_json('https://api.telegram.org/bot' + token + '/sendMessage',
-                            {'Accept': 'application/json'}, {'chat_id': chat_id, 'text': message}, method='POST')
-        if result.get('ok') is not True:
-            raise RuntimeError('telegram_rejected_message')
+        email = EmailMessage()
+        email['Subject'] = 'YC6 抽奖中奖提醒'
+        email['From'] = username
+        email['To'] = recipient
+        email.set_content(message)
+        with smtplib.SMTP_SSL('smtp.qq.com', 465, context=ssl.create_default_context(), timeout=25) as server:
+            server.login(username, password)
+            server.send_message(email)
     return send
 
 
@@ -247,12 +271,27 @@ def summary(records, notification):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=('verify', 'join', 'check'), default='verify')
+    parser.add_argument('--mode', choices=('verify', 'join', 'check', 'test-email'), default='verify')
     parser.add_argument('--probe-public', action='store_true')
     args = parser.parse_args()
     if args.probe_public:
         item = SiteAPI('').request('/lotteries/1')['item']
         print(json.dumps({key: item.get(key) for key in ('public_id', 'round_id', 'draw_state', 'daily_draw_time')}))
+        return 0
+    if args.mode == 'test-email':
+        username = os.environ.get('MAIL_USERNAME', '').strip()
+        password = os.environ.get('MAIL_PASSWORD', '').strip()
+        recipient = os.environ.get('MAIL_TO', '').strip()
+        if not (username and password and recipient):
+            print('Email test not sent: configure MAIL_USERNAME, MAIL_PASSWORD, and MAIL_TO Secrets.', file=sys.stderr)
+            return 1
+        try:
+            email_sender(username, password, recipient)(
+                'YC6 云端抽奖邮件通知测试成功。此邮件仅用于验证邮件配置，不代表中奖。')
+        except Exception:
+            print('Email test failed: check the QQ Mail SMTP authorization code and Secrets.', file=sys.stderr)
+            return 1
+        print('Test email accepted by QQ Mail SMTP. Check the recipient inbox and spam folder.')
         return 0
     accounts = [{'label': label, 'token': os.environ.get('YC6_TOKEN_' + label.upper(), '').strip()}
                 for label in ('Edge', 'Chrome')]
@@ -260,18 +299,20 @@ def main():
     notification = 'verify_only'
     state_failed = False
     if args.mode != 'verify':
-        bot = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
-        chat = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
+        mail_user = os.environ.get('MAIL_USERNAME', '').strip()
+        mail_password = os.environ.get('MAIL_PASSWORD', '').strip()
+        mail_to = os.environ.get('MAIL_TO', '').strip()
         try:
             state = GitHubState(os.environ.get('GITHUB_REPOSITORY', ''), os.environ.get('GITHUB_TOKEN', ''))
-            notification = notify_once(records, state, telegram_sender(bot, chat), bool(bot and chat))
+            sender = email_sender(mail_user, mail_password, mail_to) if mail_user and mail_password and mail_to else (lambda message: None)
+            notification = notify_once(records, state, sender, bool(mail_user and mail_password and mail_to))
             state.heartbeat()
         except Exception:
             state_failed = True
             notification = 'repository_state_failed'
     summary(records, notification)
     return int(any(record['errors'] for record in records) or state_failed
-               or notification in ('reservation_failed', 'delivery_uncertain'))
+               or notification in ('notification_state_failed', 'delivery_failed', 'sent_state_unrecorded'))
 
 
 if __name__ == '__main__':
