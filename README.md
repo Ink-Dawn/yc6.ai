@@ -48,9 +48,9 @@ GitHub 定时任务可能延迟或漏调度，不能保证精确到分钟。工�
 
 ## 中奖邮件提醒：不调用 GPT
 
-中奖只依据本人登录接口的 `result=won`，不读取公共中奖名单来猜测结果。每条新的中奖记录会通过 QQ 邮箱 SMTP 发送一封邮件；同一账号、同一中奖记录会去重，不会在每天查询时重复发送。发送失败时会在后续运行中重试；邮件发送成功后，程序才保存去重状态。邮件只包含账号标签、中奖记录编号和查看记录链接，不会发送卡密。
+中奖只依据本人登录接口的 `result=won`，不读取公共中奖名单来猜测结果。每次发现一条或多条新的中奖记录时，会通过 QQ 邮箱 SMTP 合并发送一封邮件；同一账号、同一中奖记录会去重，不会在每天查询时重复发送。发送失败时会在后续运行中重试；邮件发送成功后，程序才保存去重状态。邮件只包含账号标签、中奖记录编号和查看记录链接，不会发送卡密。
 
-请在仓库 **Settings → Secrets and variables → Actions → New repository secret** 中新增：
+请打开[仓库 Actions Secrets 设置](https://github.com/Ink-Dawn/yc6.ai/settings/secrets/actions)，在 **New repository secret** 中新增：
 
 | Secret | 内容 |
 |---|---|
