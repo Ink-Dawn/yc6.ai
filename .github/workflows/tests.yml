@@ -17,20 +17,3 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m unittest discover -s tests -v
-  smtp-test:
-    if: ${{ github.event_name == 'push' && github.event.head_commit.message == 'smtp-test-once' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    env:
-      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
-      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-      MAIL_TO: ${{ secrets.MAIL_TO }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Send one-time SMTP test email
-        run: python lottery.py --mode test-email
