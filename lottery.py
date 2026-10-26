@@ -226,7 +226,7 @@ def notify_once(records, store, send, enabled):
     lines.extend(f'- {label} 账号：中奖记录编号 {win_id}' for label, win_id, _ in pending)
     lines.extend(['', '请登录对应账号查看奖品详情：', 'https://yc6.ai/account.html?view=lotteries'])
     try:
-        send('\\n'.join(lines))
+        send('\n'.join(lines))
     except Exception:
         return 'delivery_failed'
     try:
