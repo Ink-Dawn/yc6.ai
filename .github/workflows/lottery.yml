@@ -13,7 +13,7 @@ on:
         type: choice
         required: true
         default: verify
-        options: [verify, join, check]
+        options: [verify, join, check, test-email]
 
 permissions:
   contents: write
@@ -29,8 +29,9 @@ jobs:
     env:
       YC6_TOKEN_EDGE: ${{ secrets.YC6_TOKEN_EDGE }}
       YC6_TOKEN_CHROME: ${{ secrets.YC6_TOKEN_CHROME }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+      MAIL_TO: ${{ secrets.MAIL_TO }}
       GITHUB_TOKEN: ${{ github.token }}
       RUN_MODE: ${{ inputs.mode || (github.event.schedule == '7,37 22 * * *' && 'check') || 'join' }}
     steps:
