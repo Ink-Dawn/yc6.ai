@@ -6,7 +6,7 @@
 
 ## 当前接入状态
 
-代码和定时工作流就绪，离线测试通过；**两个账号的登录 Secrets 尚未接入，尚未验证真实报名成功**。在 Edge / Chrome 登录，并不会让 GitHub 云端自动拥有相应登录状态。
+最近一次云端运行中，Edge 与 Chrome 两个账号的登录验证和本人结果查询均成功；报名状态返回 `already_joined`，表示当时两账号已报名，因此没有重复提交。离线测试通过。定时配置已写入工作流，但仍需看到 `event=schedule` 的实际运行记录才能确认定时触发。邮件发送还需要配置 SMTP Secrets 并执行一次测试邮件。
 
 接入后由 GitHub Actions 云端运行，电脑关机也不影响云端任务。抽奖、补报、查询及可选通知均为普通 Python，不调用 GPT、不唤醒 Codex / ChatGPT 会话。GitHub Actions 使用 GitHub 自己的运行资源和用量规则，不是 GPT 额度。
 
@@ -46,13 +46,21 @@
 
 GitHub 定时任务可能延迟或漏调度，不能保证精确到分钟。工作流只在默认分支执行。公开仓库长时间无活动可能禁用定时工作流；程序每 28 天最多更新一次只含时间戳的 `.state/heartbeat.json`，维持正常仓库活动。参考 [GitHub schedule 说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)。
 
-## 中奖提示：同样不使用 GPT
+## 中奖邮件提醒：不调用 GPT
 
-每次运行的 Actions Summary 都会显示两个账号的报名、结果查询和已中奖期数，不会显示真实用户名、token 或卡密。中奖只依据本人登录接口的 `result=won`，不读取公共中奖名单来猜测结果。
+中奖只依据本人登录接口的 `result=won`，不读取公共中奖名单来猜测结果。每条新的中奖记录会通过 QQ 邮箱 SMTP 发送一封邮件；同一账号、同一中奖记录会去重，不会在每天查询时重复发送。发送失败时会在后续运行中重试；邮件发送成功后，程序才保存去重状态。邮件只包含账号标签、中奖记录编号和查看记录链接，不会发送卡密。
 
-如需主动推送，可选配置 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 两个 Secrets。程序只向该 Telegram 接收者发送中奖提示及本人抽奖记录链接，不复制卡密。
+请在仓库 **Settings → Secrets and variables → Actions → New repository secret** 中新增：
 
-为保留最初“只通知一次”的要求，两个账号合计**最多尝试发送一次 Telegram 中奖通知**，之后仍继续每日报名和查询。发送前持久化 `.state/notification.json`，失败、超时或崩溃后不自动重试。因此它保证最多一次尝试，不能保证绝对送达；请勿删除该文件，否则会重置去重状态。未配置 Telegram 不会发送外部消息，也不会占用通知名额，结果仍可在 Actions 查看。
+| Secret | 内容 |
+|---|---|
+| `MAIL_USERNAME` | 用于发信的 QQ 邮箱地址 |
+| `MAIL_PASSWORD` | QQ 邮箱 SMTP 授权码（不是网页登录密码） |
+| `MAIL_TO` | 收件地址 |
+
+使用 QQ 邮箱发信时，需要先在邮箱设置中开启 SMTP/IMAP 服务并生成授权码。若使用你自己的 QQ 邮箱发给自己，`MAIL_USERNAME` 与 `MAIL_TO` 可以相同。不要将授权码发到聊天或写进仓库。
+
+保存后，打开 [Actions 工作流](https://github.com/Ink-Dawn/yc6.ai/actions/workflows/lottery.yml)，点 **Run workflow → mode: test-email**。成功后检查收件箱及垃圾邮件文件夹。该测试邮件仅验证 SMTP 配置，不代表中奖。配置未完成前，中奖记录仍会显示在每次运行的 Actions Summary 中。
 
 本版本不通过 GPT 会话通知，因为那会产生模型用量。网站登录失效、网络错误等也不会调用模型。
 
@@ -68,8 +76,10 @@ GitHub 定时任务可能延迟或漏调度，不能保证精确到分钟。工�
 | `not_open` | 活动下架、当期截止或尚未开放 |
 | `participation_failed` | 本次报名未能确认；仍会尝试查结果 |
 | `result_check_failed` | 本次本人结果查询失败，下次继续 |
-| `channel_not_configured` | 检测到中奖，但未配置 Telegram |
-| `already_reserved` | 唯一一次通知尝试已被占用，不重复发送 |
+| `channel_not_configured` | 检测到中奖，但邮件 Secrets 未配置 |
+| `already_notified` | 这些中奖记录此前已成功通知 |
+| `delivery_failed` | 邮件发送失败；后续定时运行会重试 |
+| `sent_state_unrecorded` | 邮件已提交，但去重状态保存失败；后续可能重复发送 |
 
 网站可以使现有 token 过期或撤销，无法承诺永久免维护。失效后只需更新对应 Secret；日常无需登录点击。
 
