@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+*.dpapi
+*token*.txt
+*secret*.json
+accounts.json
