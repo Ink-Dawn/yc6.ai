@@ -113,13 +113,11 @@ class CloudTests(unittest.TestCase):
         records = self.execute('check')
         self.assertEqual(records[0]['wins'], [60])
 
-    def test_notifier_reserves_once_even_when_delivery_fails(self):
+    def test_notification_retries_delivery_failure_and_deduplicates_after_success(self):
         class Store:
-            def __init__(self): self.reserved = False
-            def reserve(self):
-                if self.reserved: return False
-                self.reserved = True
-                return True
+            def __init__(self): self.sent = set()
+            def was_notified(self, key): return key in self.sent
+            def mark_notified(self, key): self.sent.add(key)
         store = Store()
         calls = []
         def fail(message):
@@ -127,14 +125,30 @@ class CloudTests(unittest.TestCase):
             raise TimeoutError('unknown delivery')
         records = [{'label': 'Edge', 'wins': [60]}]
         first = self.mod.notify_once(records, store, fail, enabled=True)
-        second = self.mod.notify_once(records, store, fail, enabled=True)
-        self.assertEqual(first, 'delivery_uncertain')
-        self.assertEqual(second, 'already_reserved')
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(first, 'delivery_failed')
+        self.assertEqual(len(store.sent), 0)
+        second = self.mod.notify_once(records, store, calls.append, enabled=True)
+        third = self.mod.notify_once(records, store, calls.append, enabled=True)
+        self.assertEqual(second, 'sent')
+        self.assertEqual(third, 'already_notified')
+        self.assertEqual(len(calls), 2)
+        self.assertIn('Edge', calls[1])
 
-    def test_no_prize_or_no_channel_does_not_reserve(self):
+    def test_new_win_gets_a_separate_notification(self):
         class Store:
-            def reserve(self): raise AssertionError('must not reserve')
+            def __init__(self): self.sent = set()
+            def was_notified(self, key): return key in self.sent
+            def mark_notified(self, key): self.sent.add(key)
+        store = Store()
+        records = [{'label': 'Edge', 'wins': [60]}]
+        self.assertEqual(self.mod.notify_once(records, store, lambda _: None, True), 'sent')
+        records[0]['wins'].append(61)
+        self.assertEqual(self.mod.notify_once(records, store, lambda _: None, True), 'sent')
+
+    def test_no_prize_or_no_channel_does_not_read_or_write_state(self):
+        class Store:
+            def was_notified(self, key): raise AssertionError('must not read state')
+            def mark_notified(self, key): raise AssertionError('must not write state')
         self.assertEqual(self.mod.notify_once([{'label': 'Edge', 'wins': []}], Store(), print, True), 'no_win')
         self.assertEqual(self.mod.notify_once([{'label': 'Edge', 'wins': [60]}], Store(), print, False), 'channel_not_configured')
 
