@@ -6,6 +6,9 @@ on:
       timezone: Asia/Shanghai
     - cron: '7,37 22 * * *'
       timezone: Asia/Shanghai
+    # Reconcile participation after delayed or dropped daily triggers.
+    - cron: '17 */2 * * *'
+      timezone: Asia/Shanghai
   workflow_dispatch:
     inputs:
       mode:
@@ -33,7 +36,9 @@ jobs:
       MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
       MAIL_TO: ${{ secrets.MAIL_TO }}
       GITHUB_TOKEN: ${{ github.token }}
-      RUN_MODE: ${{ inputs.mode || (github.event.schedule == '7,37 22 * * *' && 'check') || 'join' }}
+      # All automatic runs check participation first, then query own results.
+      # Existing my_entry prevents duplicate submissions; manual modes remain explicit.
+      RUN_MODE: ${{ inputs.mode || 'join' }}
     steps:
       - uses: actions/checkout@v4
         with:
