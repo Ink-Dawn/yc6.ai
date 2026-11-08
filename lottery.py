@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 import hashlib
 import json
+import socket
 import os
 import re
 import smtplib
@@ -18,6 +19,32 @@ from urllib import error, request
 class NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise RuntimeError('redirect_refused')
+
+
+def safe_error_code(exc):
+    """Only locally defined codes may reach public Actions logs."""
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return 'timeout'
+    if isinstance(exc, error.URLError):
+        return 'network_error'
+    if isinstance(exc, json.JSONDecodeError):
+        return 'invalid_json'
+    if isinstance(exc, (KeyError, TypeError, ValueError, AttributeError)):
+        return 'invalid_response_schema'
+    if type(exc) is RuntimeError and len(exc.args) == 1:
+        code = exc.args[0]
+        if isinstance(code, str) and (code in {
+                'redirect_refused', 'response_too_large', 'invalid_response',
+                'website_rejected_request', 'wrong_activity', 'invalid_round',
+                'participation_not_verified'} or re.fullmatch(r'http_[1-5][0-9]{2}', code)):
+            return code
+    return 'unexpected_error'
+
+
+class ParticipationError(RuntimeError):
+    def __init__(self, stage, cause):
+        self.code = f'participation_{stage}_failed:{safe_error_code(cause)}'
+        super().__init__(self.code)
 
 
 def fetch_json(url, headers, body=None, method=None, missing_ok=False):
@@ -70,25 +97,58 @@ def identity(api):
     return int(user_id)
 
 
-def join_current(api):
+def read_current(api):
     data = api.request('/lotteries/1')
     item = data['item']
     if int(item.get('public_id', item.get('id', 0))) != 1:
         raise RuntimeError('wrong_activity')
+    return data, item
+
+
+def joined_round(api, round_id):
+    _, item = read_current(api)
+    return int(item['round_id']) == round_id and item.get('my_entry', {}).get('joined') is True
+
+
+def prepare_join(api):
+    data, item = read_current(api)
     if item.get('my_entry', {}).get('joined') is True:
-        return 'already_joined'
+        return 'already_joined', None
     if (item.get('drawn_at') or item.get('draw_state') != 'open'
             or item.get('is_visible') is not True or item.get('status') != 'active'
             or float(item['draw_at_ts']) <= float(data['server_time'])):
-        return 'not_open'
+        return 'not_open', None
     round_id = int(item['round_id'])
     if round_id <= 0:
         raise RuntimeError('invalid_round')
+    return None, round_id
+
+
+def join_current(api):
+    try:
+        outcome, round_id = prepare_join(api)
+    except Exception as exc:
+        raise ParticipationError('read', exc) from None
+    if outcome:
+        return outcome
     # Do not retry POST blindly. Every later run rereads my_entry first.
-    api.request('/lotteries/1/join', {'round_id': round_id})
-    verified = api.request('/lotteries/1')['item']
-    if int(verified['round_id']) != round_id or verified.get('my_entry', {}).get('joined') is not True:
-        raise RuntimeError('participation_not_verified')
+    try:
+        api.request('/lotteries/1/join', {'round_id': round_id})
+    except Exception as exc:
+        # A lost response does not mean the server rejected the submission.
+        # Reconcile with one read, never a second POST or another round.
+        try:
+            confirmed = joined_round(api, round_id)
+        except Exception:
+            confirmed = False
+        if confirmed:
+            return 'joined'
+        raise ParticipationError('submit', exc) from None
+    try:
+        if not joined_round(api, round_id):
+            raise RuntimeError('participation_not_verified')
+    except Exception as exc:
+        raise ParticipationError('verify', exc) from None
     return 'joined'
 
 
@@ -143,6 +203,9 @@ def run_accounts(accounts, mode, make_api=SiteAPI):
         if mode == 'join':
             try:
                 record['participation'] = join_current(api)
+            except ParticipationError as exc:
+                record['participation'] = 'failed'
+                record['errors'].extend(['participation_failed', exc.code])
             except Exception:
                 record['participation'] = 'failed'
                 record['errors'].append('participation_failed')

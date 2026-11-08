@@ -157,6 +157,81 @@ class CloudTests(unittest.TestCase):
         with self.assertRaises(ValueError): api.request('/orders', {'amount': 1})
         with self.assertRaises(ValueError): api.request('/lotteries/1/join')
 
+    def participation_case(self, fault, accepted=False, rollover=False):
+        site = self.site(7)
+        original = site.request
+        reads = 0
+        def request(path, body=None):
+            nonlocal reads
+            if path == '/lotteries/1':
+                reads += 1
+                if fault == 'read' or (fault == 'verify' and reads > 1):
+                    raise RuntimeError('http_503')
+                data = original(path, body)
+                if rollover and reads > 1:
+                    data['item']['round_id'] += 1
+                return data
+            if path.endswith('/join') and fault == 'submit':
+                site.calls.append((path, body))
+                site.joined = accepted
+                raise TimeoutError('SECRET-TOKEN PRIVATE-CARD')
+            return original(path, body)
+        site.request = request
+        self.sites = {'edge-test-token': site, 'chrome-test-token': self.site(8)}
+        return self.execute(), site
+
+    def test_activity_read_failure_is_distinguished_and_no_post(self):
+        records, site = self.participation_case('read')
+        self.assertIn('participation_read_failed:http_503', records[0]['errors'])
+        self.assertFalse(any(p.endswith('/join') for p, _ in site.calls))
+        self.assertEqual(records[0]['result_check'], 'ok')
+        self.assertEqual(records[1]['participation'], 'joined')
+
+    def test_unaccepted_submit_timeout_is_not_retried(self):
+        records, site = self.participation_case('submit')
+        self.assertIn('participation_submit_failed:timeout', records[0]['errors'])
+        self.assertEqual(sum(p.endswith('/join') for p, _ in site.calls), 1)
+        self.assertEqual(records[0]['result_check'], 'ok')
+        self.assertNotIn('SECRET-TOKEN', str(records))
+
+    def test_accepted_submit_timeout_is_reconciled_without_second_post(self):
+        records, site = self.participation_case('submit', accepted=True)
+        self.assertEqual(records[0]['participation'], 'joined')
+        self.assertEqual(records[0]['errors'], [])
+        self.assertEqual(sum(p.endswith('/join') for p, _ in site.calls), 1)
+
+    def test_reconciliation_does_not_confirm_a_different_round(self):
+        records, site = self.participation_case('submit', accepted=True, rollover=True)
+        self.assertEqual(records[0]['participation'], 'failed')
+        self.assertEqual(sum(p.endswith('/join') for p, _ in site.calls), 1)
+
+    def test_post_verification_failure_is_distinguished(self):
+        records, site = self.participation_case('verify')
+        self.assertIn('participation_verify_failed:http_503', records[0]['errors'])
+        self.assertEqual(sum(p.endswith('/join') for p, _ in site.calls), 1)
+        self.assertEqual(records[0]['result_check'], 'ok')
+
+    def test_round_change_after_successful_post_is_not_verified(self):
+        records, _ = self.participation_case(None, rollover=True)
+        self.assertIn('participation_verify_failed:participation_not_verified', records[0]['errors'])
+
+    def test_safe_codes_never_include_exception_payloads(self):
+        for exc in (RuntimeError('http_403 SECRET-TOKEN'), KeyError('PRIVATE-CARD'),
+                    ValueError('SECRET-TOKEN'), self.mod.error.URLError('SECRET-TOKEN')):
+            code = self.mod.safe_error_code(exc)
+            self.assertNotIn('SECRET-TOKEN', code)
+            self.assertNotIn('PRIVATE-CARD', code)
+        self.assertEqual(self.mod.safe_error_code(RuntimeError('http_403')), 'http_403')
+
+    def test_malformed_activity_is_reported_without_post(self):
+        site = self.site(7)
+        original = site.request
+        site.request = lambda path, body=None: {'item': None} if path == '/lotteries/1' else original(path, body)
+        self.sites = {'edge-test-token': site, 'chrome-test-token': self.site(8)}
+        records = self.execute()
+        self.assertIn('participation_read_failed:invalid_response_schema', records[0]['errors'])
+        self.assertFalse(any(p.endswith('/join') for p, _ in site.calls))
+
 
 if __name__ == '__main__':
     unittest.main()
