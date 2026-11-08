@@ -1,7 +1,11 @@
 import copy
+import contextlib
 import importlib.util
+import io
+import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
 MODULE = Path(__file__).resolve().parents[1] / 'lottery.py'
 
@@ -231,6 +235,68 @@ class CloudTests(unittest.TestCase):
         records = self.execute()
         self.assertIn('participation_read_failed:invalid_response_schema', records[0]['errors'])
         self.assertFalse(any(p.endswith('/join') for p, _ in site.calls))
+
+    def http_failure(self, status, body):
+        response = io.BytesIO(body)
+        failure = self.mod.error.HTTPError('https://yc6.ai/api/v1/lotteries/1/join',
+                                          status, 'SECRET-TOKEN', {}, response)
+        opener = mock.Mock()
+        opener.open.side_effect = failure
+        with mock.patch.object(self.mod.request, 'build_opener', return_value=opener):
+            with self.assertRaises(RuntimeError) as caught:
+                self.mod.fetch_json('https://yc6.ai/api/v1/lotteries/1/join', {}, {'round_id': 61})
+        return str(caught.exception)
+
+    def test_human_verification_response_is_recognized_without_sensitive_details(self):
+        body = json.dumps({'success': False, 'error': {
+            'code': 'HUMAN_VERIFICATION_REQUIRED', 'message': 'SECRET-TOKEN',
+            'details': {'challenge_id': 'PRIVATE-CHALLENGE', 'ticket': 'PRIVATE-TICKET'}}}).encode()
+        self.assertEqual(self.http_failure(428, body), 'human_verification_required')
+
+    def test_other_428_payloads_remain_http_failures(self):
+        for body in (b'<html>SECRET-TOKEN</html>', b'null', b'[]', b'{"error": null}',
+                     b'{"error":{"code":"SECRET-TOKEN"}}',
+                     b'{"error":{"code":"HUMAN_VERIFICATION_REQUIRED"}}' + b' ' * 16_384):
+            with self.subTest(body=body[:25]):
+                self.assertEqual(self.http_failure(428, body), 'http_428')
+
+    def test_non_428_is_not_misclassified_as_captcha(self):
+        body = b'{"error":{"code":"HUMAN_VERIFICATION_REQUIRED"}}'
+        self.assertEqual(self.http_failure(403, body), 'http_403')
+
+    def test_captcha_requires_manual_action_without_retry_and_preserves_result_check(self):
+        site = self.site(7)
+        original = site.request
+        def request(path, body=None):
+            if path.endswith('/join'):
+                site.calls.append((path, body))
+                raise RuntimeError('human_verification_required')
+            return original(path, body)
+        site.request = request
+        self.sites = {'edge-test-token': site, 'chrome-test-token': self.site(8)}
+        records = self.execute()
+        self.assertEqual(records[0]['participation'], 'manual_required')
+        self.assertIn('participation_submit_failed:human_verification_required', records[0]['errors'])
+        self.assertEqual(records[0]['result_check'], 'ok')
+        self.assertEqual(records[1]['participation'], 'joined')
+        self.assertEqual(sum(p.endswith('/join') for p, _ in site.calls), 1)
+        self.assertEqual(sum(p == '/lotteries/1' for p, _ in site.calls), 1)
+        output = io.StringIO()
+        with mock.patch.dict(self.mod.os.environ, {'GITHUB_STEP_SUMMARY': ''}):
+            with contextlib.redirect_stdout(output):
+                self.mod.summary(records, 'no_win')
+        self.assertIn('需要本人完成网站人机验证', output.getvalue())
+        self.assertIn('https://yc6.ai/lottery.html?id=1', output.getvalue())
+
+    def test_main_does_not_mark_manual_required_as_success(self):
+        records = [{'label': 'Edge', 'identity_ok': True, 'participation': 'manual_required',
+                    'result_check': 'ok', 'wins': [],
+                    'errors': ['participation_failed', 'participation_submit_failed:human_verification_required']}]
+        with mock.patch.object(self.mod.sys, 'argv', ['lottery.py', '--mode', 'join']), \
+                mock.patch.object(self.mod, 'run_accounts', return_value=records), \
+                mock.patch.object(self.mod, 'GitHubState'), \
+                mock.patch.object(self.mod, 'summary'):
+            self.assertEqual(self.mod.main(), 1)
 
 
 if __name__ == '__main__':
