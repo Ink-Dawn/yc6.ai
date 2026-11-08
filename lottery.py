@@ -36,7 +36,8 @@ def safe_error_code(exc):
         if isinstance(code, str) and (code in {
                 'redirect_refused', 'response_too_large', 'invalid_response',
                 'website_rejected_request', 'wrong_activity', 'invalid_round',
-                'participation_not_verified'} or re.fullmatch(r'http_[1-5][0-9]{2}', code)):
+                'participation_not_verified', 'human_verification_required'}
+                or re.fullmatch(r'http_[1-5][0-9]{2}', code)):
             return code
     return 'unexpected_error'
 
@@ -60,6 +61,19 @@ def fetch_json(url, headers, body=None, method=None, missing_ok=False):
     except error.HTTPError as exc:
         if exc.code == 404 and missing_ok:
             return None
+        if exc.code == 428:
+            # Recognize only the site's exact public error code. Never log or
+            # retain the message, challenge ID, ticket, or response body.
+            try:
+                raw_error = exc.read(16_385)
+                payload = json.loads(raw_error) if len(raw_error) <= 16_384 else None
+                details = payload.get('error') if isinstance(payload, dict) else None
+                if isinstance(details, dict) and details.get('code') == 'HUMAN_VERIFICATION_REQUIRED':
+                    raise RuntimeError('human_verification_required') from None
+            except (ValueError, OSError):
+                pass
+            finally:
+                exc.close()
         # Never propagate server response text: it may embed credentials.
         raise RuntimeError(f'http_{exc.code}') from None
     if len(raw) > 2_000_000:
@@ -135,6 +149,10 @@ def join_current(api):
     try:
         api.request('/lotteries/1/join', {'round_id': round_id})
     except Exception as exc:
+        if safe_error_code(exc) == 'human_verification_required':
+            # The site explicitly requires an interactive CAPTCHA. No automated
+            # solver, challenge replay, or repeated POST is attempted.
+            raise ParticipationError('submit', exc) from None
         # A lost response does not mean the server rejected the submission.
         # Reconcile with one read, never a second POST or another round.
         try:
@@ -204,7 +222,8 @@ def run_accounts(accounts, mode, make_api=SiteAPI):
             try:
                 record['participation'] = join_current(api)
             except ParticipationError as exc:
-                record['participation'] = 'failed'
+                record['participation'] = ('manual_required' if exc.code.endswith(':human_verification_required')
+                                           else 'failed')
                 record['errors'].extend(['participation_failed', exc.code])
             except Exception:
                 record['participation'] = 'failed'
@@ -321,6 +340,13 @@ def summary(records, notification):
             **{k: v for k, v in record.items() if k != 'errors'},
             auth='ok' if record['identity_ok'] else 'failed', count=len(record['wins']),
             errors=', '.join(record['errors']) or 'ok'))
+    if any(record['participation'] == 'manual_required' for record in records):
+        rows.extend(['', '### 需要本人完成网站人机验证', '',
+                     '网站要求交互式验证码，云端脚本无法自动完成报名。',
+                     '请分别在 Edge、Chrome 登录对应账号，打开 https://yc6.ai/lottery.html?id=1，',
+                     '点击参与抽奖并完成网站验证，确认页面显示已参与。',
+                     '随后在 Actions 的 main 分支新建 mode: join 运行，核对 already_joined。',
+                     '本人中奖结果查询仍独立执行；需要验证的报名保持非成功状态。'])
     rows.extend(['', '通知状态：' + notification, '',
                  '本程序未调用 GPT。missing_token 表示尚未接入账号；authentication_failed 表示登录状态无效。',
                  '无论是否中奖，账号资料、token 和奖品卡密均不写入日志或仓库。'])

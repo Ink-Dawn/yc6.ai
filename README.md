@@ -6,6 +6,8 @@
 
 ## 当前接入状态
 
+2026-11-08：#68 两账号的报名提交返回 HTTP 428。网站已开启活动场景的人机验证，前端对 `HUMAN_VERIFICATION_REQUIRED` 启动交互式验证码。脚本现在只识别该固定错误码，显示 `manual_required` 和本人操作提示；本人结果查询仍继续。无人值守报名能否执行取决于网站是否要求验证，不能承诺全自动报名。
+
 定时运行已经实际触发：2026-10-27 北京时间14:11，两个账号均返回 `joined`；2026-10-28 凌晨03:24，两个账号本人中奖记录查询正常。10月28日上午预期的报名任务未产生运行记录，因此新增每2小时补跑，并让所有自动运行都先检查是否需要报名，再查询结果。GitHub 的定时触发可能延迟或丢弃，增加补跑只能降低漏报风险，不能保证准点。邮件发送仍需配置 SMTP Secrets 并执行测试邮件。
 
 接入后由 GitHub Actions 云端运行，电脑关机也不影响云端任务。抽奖、补报、查询及可选通知均为普通 Python，不调用 GPT、不唤醒 Codex / ChatGPT 会话。GitHub Actions 使用 GitHub 自己的运行资源和用量规则，不是 GPT 额度。
@@ -77,6 +79,7 @@ GitHub 定时任务可能延迟或漏调度，不能保证精确到分钟。工�
 | `joined` | 网站已确认本期报名 |
 | `already_joined` | 本期已报名，未重复提交 |
 | `not_open` | 活动下架、当期截止或尚未开放 |
+| `manual_required` | 网站要求人机验证；需本人在对应浏览器账号完成报名，本次保持失败退出 |
 | `participation_failed` | 本次报名未能确认；仍会尝试查结果，后附具体阶段及安全错误码 |
 | `participation_read_failed:*` | 读取或解析活动状态失败；未提交报名 |
 | `participation_submit_failed:*` | 提交异常，随后读取也未能确认同一期已报名；不重复 POST |
@@ -87,7 +90,7 @@ GitHub 定时任务可能延迟或漏调度，不能保证精确到分钟。工�
 | `delivery_failed` | 邮件发送失败；后续定时运行会重试 |
 | `sent_state_unrecorded` | 邮件已提交，但去重状态保存失败；后续可能重复发送 |
 
-网站可以使现有 token 过期或撤销，无法承诺永久免维护。失效后只需更新对应 Secret；日常无需登录点击。
+网站可以使现有 token 过期或撤销，无法承诺永久免维护。登录失效后需更新对应 Secret；若出现 `manual_required`，则需本人打开活动页完成该期报名及验证码，不能通过更换 token 解决。
 
 Secrets 的正确设置方法见 [GitHub 官方文档](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)。本仓库只保存程序、测试和最少运行状态，永不保存网站凭据。
 
@@ -107,4 +110,6 @@ python -m unittest discover -s tests -v
 
 阶段错误码仅使用本地白名单，例如 `http_403`、`http_503`、`timeout`、`invalid_response_schema`，不输出原始异常、服务端响应正文或凭据。提交异常后只额外读取一次状态；只有相同 `round_id` 且 `my_entry.joined=true` 才视作成功。未确认时仍返回失败并独立查询本人结果，后续定时运行会先重新读取状态。
 
-2026-11-08 排查：#63 与 #64–#67 使用同一提交，#63 两账号均为 `already_joined`，并非新报名成功。公开活动读取和网页报名路径仍可核对，但历史日志没有保存具体失败原因，因此不能据此断言线上根因已修复。新版须在 Actions 手动执行 `join`，依据阶段错误码进一步验收；重跑旧运行仍使用旧提交。
+2026-11-08 排查：#63 与 #64–#67 使用同一提交，#63 两账号均为 `already_joined`，没有执行新报名。#68 新版诊断已定位为提交阶段 HTTP 428。只有响应中的固定错误码为 `HUMAN_VERIFICATION_REQUIRED` 才标记 `manual_required`，其他 428 仍按 HTTP 错误处理。错误正文最多解析 16 KiB，原始正文及挑战资料不会进入日志或仓库。
+
+出现 `manual_required` 时：分别在 Edge、Chrome 的对应账号打开 [抽奖 1](https://yc6.ai/lottery.html?id=1)，点击参与并完成网站验证码，确认页面显示已参与；随后在 Actions 的 `main` 分支新建 `join` 运行，检查两账号 `already_joined`。这只确认当期报名，不保证后续期数免验证码。脚本不会自动求解、重放或绕过验证码。

@@ -1,0 +1,37 @@
+name: Temporary lottery diagnosis
+on:
+  push:
+    branches: [fix/lottery-human-verification]
+    paths: ['.github/workflows/lottery-diagnose.yml']
+permissions:
+  contents: read
+concurrency:
+  group: yc6-two-account-lottery
+  cancel-in-progress: false
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Diagnose signup response once per account
+        env:
+          YC6_TOKEN_EDGE: ${{ secrets.YC6_TOKEN_EDGE }}
+          YC6_TOKEN_CHROME: ${{ secrets.YC6_TOKEN_CHROME }}
+        run: |
+          python - <<'PY'
+          import os
+          from lottery import run_accounts, summary
+          accounts = [{'label': label, 'token': os.environ.get('YC6_TOKEN_' + label.upper(), '').strip()}
+                      for label in ('Edge', 'Chrome')]
+          records = run_accounts(accounts, 'join')
+          summary(records, 'diagnostic_only')
+          raise SystemExit(int(any(record['errors'] for record in records)))
+          PY
