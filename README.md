@@ -77,7 +77,10 @@ GitHub 定时任务可能延迟或漏调度，不能保证精确到分钟。工�
 | `joined` | 网站已确认本期报名 |
 | `already_joined` | 本期已报名，未重复提交 |
 | `not_open` | 活动下架、当期截止或尚未开放 |
-| `participation_failed` | 本次报名未能确认；仍会尝试查结果 |
+| `participation_failed` | 本次报名未能确认；仍会尝试查结果，后附具体阶段及安全错误码 |
+| `participation_read_failed:*` | 读取或解析活动状态失败；未提交报名 |
+| `participation_submit_failed:*` | 提交异常，随后读取也未能确认同一期已报名；不重复 POST |
+| `participation_verify_failed:*` | 提交返回成功，但后续读取或同一期报名验证失败 |
 | `result_check_failed` | 本次本人结果查询失败，下次继续 |
 | `channel_not_configured` | 检测到中奖，但邮件 Secrets 未配置 |
 | `already_notified` | 这些中奖记录此前已成功通知 |
@@ -99,3 +102,9 @@ python -m unittest discover -s tests -v
 ```
 
 `Offline tests` 工作流会自动验证提交和 PR，无需任何账号 Secrets。手动 `verify` 只验证登录，不报名、不发通知；`join` 会真实报名，`check` 仅查结果。
+
+### 报名故障诊断
+
+阶段错误码仅使用本地白名单，例如 `http_403`、`http_503`、`timeout`、`invalid_response_schema`，不输出原始异常、服务端响应正文或凭据。提交异常后只额外读取一次状态；只有相同 `round_id` 且 `my_entry.joined=true` 才视作成功。未确认时仍返回失败并独立查询本人结果，后续定时运行会先重新读取状态。
+
+2026-11-08 排查：#63 与 #64–#67 使用同一提交，#63 两账号均为 `already_joined`，并非新报名成功。公开活动读取和网页报名路径仍可核对，但历史日志没有保存具体失败原因，因此不能据此断言线上根因已修复。新版须在 Actions 手动执行 `join`，依据阶段错误码进一步验收；重跑旧运行仍使用旧提交。
