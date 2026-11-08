@@ -113,3 +113,6 @@ python -m unittest discover -s tests -v
 2026-11-08 排查：#63 与 #64–#67 使用同一提交，#63 两账号均为 `already_joined`，没有执行新报名。#68 新版诊断已定位为提交阶段 HTTP 428。只有响应中的固定错误码为 `HUMAN_VERIFICATION_REQUIRED` 才标记 `manual_required`，其他 428 仍按 HTTP 错误处理。错误正文最多解析 16 KiB，原始正文及挑战资料不会进入日志或仓库。
 
 出现 `manual_required` 时：分别在 Edge、Chrome 的对应账号打开 [抽奖 1](https://yc6.ai/lottery.html?id=1)，点击参与并完成网站验证码，确认页面显示已参与；随后在 Actions 的 `main` 分支新建 `join` 运行，检查两账号 `already_joined`。这只确认当期报名，不保证后续期数免验证码。脚本不会自动求解、重放或绕过验证码。
+
+
+已于 2026-11-08 北京时间 12:05 使用[一次性诊断运行](https://github.com/Ink-Dawn/yc6.ai/actions/runs/42445340731)核实：两个账号登录及本人结果查询均 `ok`，报名均为 `manual_required`，服务端固定错误码均为 `HUMAN_VERIFICATION_REQUIRED`。26 项离线测试通过。需要本人完成验证码，尚未恢复无人值守报名；临时诊断工作流在验收后移除。
